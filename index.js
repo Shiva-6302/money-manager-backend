@@ -3,72 +3,29 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 require('dotenv').config();
 
-// Ensure the model path is correct
 const Transaction = require('./models/Transaction');
-
 const app = express();
 
-// Middlewares
 app.use(cors());
 app.use(express.json());
 
-/**
- * 1. Health Check Route
- * Useful for verifying server status during deployment (e.g., on Render or AWS)
- */
-app.get('/api/health', (req, res) => {
-    res.status(200).json({ status: 'Server is healthy and running' });
-});
+// 1. Health Check
+app.get('/api/health', (req, res) => res.status(200).json({ status: 'OK' }));
 
-/**
- * 2. POST: Add New Transaction
- * Handles saving both Office and Personal transactions.
- */
-app.post('/api/transactions', async (req, res) => {
-    try {
-        const { title, amount, type, category, division, date } = req.body;
-        
-        // Basic validation
-        if (!title || !amount || !type || !division) {
-            return res.status(400).json({ error: "Missing required fields" });
-        }
-
-        const newTransaction = new Transaction({
-            title,
-            amount: Number(amount),
-            type, // 'income' or 'expense'
-            category,
-            division, // 'Office' or 'Personal'
-            date: date || Date.now()
-        });
-
-        const savedTransaction = await newTransaction.save();
-        res.status(201).json(savedTransaction);
-    } catch (err) {
-        res.status(400).json({ error: err.message });
-    }
-});
-
-/**
- * 3. GET: Fetch Transactions
- * Supports filtering for the History functionality and Dashboard lists.
- */
+// 2. GET: Fetch with Advanced Filters (Date range, Division, Category)
 app.get('/api/transactions', async (req, res) => {
     try {
-        const { division, category, startDate, endDate } = req.query;
+        const { division, category, startDate, endDate, type } = req.query;
         let filter = {};
 
-        if (division) filter.division = division;
-        if (category) filter.category = category;
+        if (division && division !== 'All') filter.division = division;
+        if (category && category !== 'All') filter.category = category;
+        if (type && type !== 'All') filter.type = type;
         
         if (startDate && endDate) {
-            filter.date = { 
-                $gte: new Date(startDate), 
-                $lte: new Date(endDate) 
-            };
+            filter.date = { $gte: new Date(startDate), $lte: new Date(endDate) };
         }
 
-        // Sort by date descending so newest appear at the top
         const transactions = await Transaction.find(filter).sort({ date: -1 });
         res.json(transactions);
     } catch (err) {
@@ -76,45 +33,73 @@ app.get('/api/transactions', async (req, res) => {
     }
 });
 
-/**
- * 4. GET: Dashboard Stats
- * Aggregates data for the top summary cards (Balance, Income, Expenses).
- */
-app.get('/api/stats', async (req, res) => {
+// 3. POST: Standard Add
+app.post('/api/transactions', async (req, res) => {
     try {
-        const transactions = await Transaction.find();
-        
-        const income = transactions
-            .filter(t => t.type === 'income')
-            .reduce((acc, curr) => acc + curr.amount, 0);
-            
-        const expenses = transactions
-            .filter(t => t.type === 'expense')
-            .reduce((acc, curr) => acc + curr.amount, 0);
-
-        res.json({
-            totalBalance: income - expenses,
-            totalIncome: income,
-            totalExpenses: expenses,
-            count: transactions.length
-        });
+        const newTransaction = new Transaction({ ...req.body, date: req.body.date || Date.now() });
+        const saved = await newTransaction.save();
+        res.status(201).json(saved);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        res.status(400).json({ error: err.message });
     }
 });
 
-// Server & Database Connection
+// 4. POST: Account Transfer (Double Entry)
+app.post('/api/transactions/transfer', async (req, res) => {
+    try {
+        const { amount, fromDivision, toDivision } = req.body;
+        const date = Date.now();
+
+        const outgoing = new Transaction({
+            title: `Transfer to ${toDivision}`,
+            amount: Number(amount),
+            type: 'expense',
+            category: 'Transfer',
+            division: fromDivision,
+            date
+        });
+
+        const incoming = new Transaction({
+            title: `Transfer from ${fromDivision}`,
+            amount: Number(amount),
+            type: 'income',
+            category: 'Transfer',
+            division: toDivision,
+            date
+        });
+
+        await outgoing.save();
+        await incoming.save();
+        res.status(201).json({ message: "Transfer Successful" });
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+// 5. PUT: Edit with 12-Hour Rule
+app.put('/api/transactions/:id', async (req, res) => {
+    try {
+        const transaction = await Transaction.findById(req.params.id);
+        if (!transaction) return res.status(404).json({ error: "Not found" });
+
+        const TWELVE_HOURS = 12 * 60 * 60 * 1000;
+        if (Date.now() - new Date(transaction.date).getTime() > TWELVE_HOURS) {
+            return res.status(403).json({ error: "Edit window expired (12h limit)" });
+        }
+
+        const updated = await Transaction.findByIdAndUpdate(req.params.id, req.body, { new: true });
+        res.json(updated);
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
 const PORT = process.env.PORT || 5000;
-// Defaulting to local MongoDB; remember to update .env for production/cloud
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/moneyManager';
 
 mongoose.connect(MONGO_URI)
     .then(() => {
-        console.log('✅ Database Connected Successfully');
-        app.listen(PORT, () => {
-            console.log(`🚀 Server active on: http://localhost:${PORT}`);
-        });
+        console.log('✅ Connected');
+        app.listen(PORT, () => console.log(`🚀 Port: ${PORT}`));
     })
-    .catch(err => {
-        console.error('❌ Connection failed:', err.message);
-    });
+    .catch(err => console.error('❌ Failed:', err.message));
